@@ -13,13 +13,19 @@ Trade Logic:
 
   The midpoint acts as a pullback entry in the direction of the original breakout.
 
+Focus: FAVORABLE RISK/REWARD (1:1 minimum, targeting 2:1 and 3:1)
+  - All results include slippage (1 tick = 0.25pt each way) and commission ($2.50/side)
+  - SL/TP grid only shows R:R >= 1:1 combinations
+  - Breakeven + trailing stop mechanics for letting winners run
+  - Walk-forward validation (train/test split)
+
 Questions answered:
-  1. What are the best conditions for a midpoint trade?
-     (OR size, excursion distance, time of day, speed of pullback, etc.)
-  2. What separates winning midpoint trades from losing ones?
-  3. Optimal stop loss and take profit?
-  4. Trailing stop vs fixed?
-  5. Combined filter optimization
+  1. MFE/MAE distributions — what R:R is realistic?
+  2. What factors produce the best R:R setups?
+  3. Optimal SL/TP at 1:1, 2:1, 3:1 R:R?
+  4. Breakeven + trailing stop for uncapped upside?
+  5. Best filter combos with favorable R:R?
+  6. Walk-forward validation — does the edge hold out of sample?
 
 Usage:
   1. Ensure es_data.parquet is in the current directory (or set ES_DATA env var)
@@ -49,22 +55,43 @@ RTH_END = "16:00"
 # Excursion thresholds to test
 EXCURSION_THRESHOLDS = [3, 5, 7, 9, 11, 13, 15, 20]
 
-# Stop / target levels to test (points from midpoint)
-STOP_LEVELS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
-TARGET_LEVELS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12, 15]
+# Cost model
+SLIPPAGE_TICKS = 1          # 1 tick each way = 0.25pt
+SLIPPAGE_PTS = SLIPPAGE_TICKS * TICK_SIZE  # 0.25 pt
+COMMISSION_PER_SIDE = 2.50  # dollars
+ES_POINT_VALUE = 50.0       # $50 per point for ES
 
-# Trailing stop configs
-TRAILING_CONFIGS = [
-    (1.0, 0.75),
-    (1.0, 1.0),
-    (1.5, 1.0),
-    (2.0, 1.0),
-    (2.0, 1.5),
-    (3.0, 1.5),
-    (3.0, 2.0),
-    (4.0, 2.0),
-    (5.0, 2.5),
-    (5.0, 3.0),
+# Round-trip cost in points: (2 * slippage) + (2 * commission / point_value)
+RT_COST_PTS = (2 * SLIPPAGE_PTS) + (2 * COMMISSION_PER_SIDE / ES_POINT_VALUE)
+# = 0.50 + 0.10 = 0.60 pts round trip
+
+# Stop levels for R:R grid (these are STOP sizes)
+STOP_LEVELS = [1.5, 2, 2.5, 3, 4, 5]
+
+# R:R ratios to test (TP = SL * ratio)
+RR_RATIOS = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+
+# Breakeven + trailing configs: (initial_sl, be_trigger, trail_activate, trail_distance)
+# be_trigger = move stop to breakeven after this much profit
+# trail_activate = start trailing after this much profit
+# trail_distance = trail this far behind price
+BE_TRAIL_CONFIGS = [
+    # (initial_sl, be_trigger, trail_activate, trail_distance)
+    (3.0, 2.0, 3.0, 1.5),   # SL=3, BE at +2, trail at +3, trail 1.5pt
+    (3.0, 2.0, 4.0, 2.0),   # SL=3, BE at +2, trail at +4, trail 2pt
+    (3.0, 2.0, 5.0, 2.5),   # SL=3, BE at +2, trail at +5, trail 2.5pt
+    (3.0, 3.0, 5.0, 2.0),   # SL=3, BE at +3, trail at +5, trail 2pt
+    (4.0, 2.0, 4.0, 2.0),   # SL=4, BE at +2, trail at +4, trail 2pt
+    (4.0, 3.0, 5.0, 2.0),   # SL=4, BE at +3, trail at +5, trail 2pt
+    (4.0, 3.0, 6.0, 3.0),   # SL=4, BE at +3, trail at +6, trail 3pt
+    (5.0, 3.0, 5.0, 2.0),   # SL=5, BE at +3, trail at +5, trail 2pt
+    (5.0, 3.0, 6.0, 2.5),   # SL=5, BE at +3, trail at +6, trail 2.5pt
+    (5.0, 4.0, 8.0, 3.0),   # SL=5, BE at +4, trail at +8, trail 3pt
+    (3.0, 1.5, 3.0, 2.0),   # SL=3, BE at +1.5, trail at +3, trail 2pt
+    (2.5, 1.5, 3.0, 1.5),   # SL=2.5, BE at +1.5, trail at +3, trail 1.5pt
+    (2.0, 1.5, 3.0, 1.5),   # SL=2, BE at +1.5, trail at +3, trail 1.5pt
+    (3.0, 2.0, 6.0, 3.0),   # SL=3, BE at +2, trail at +6, trail 3pt
+    (4.0, 2.0, 6.0, 3.0),   # SL=4, BE at +2, trail at +6, trail 3pt
 ]
 
 
@@ -436,10 +463,20 @@ def _measure_reaction(setup: MidpointSetup):
 
 
 # ---------------------------------------------------------------------------
-# TRADE SIMULATION
+# TRADE SIMULATION (with slippage + commission)
 # ---------------------------------------------------------------------------
+def _net_pnl(gross_pnl_pts: float) -> float:
+    """Apply round-trip costs to gross PnL."""
+    return gross_pnl_pts - RT_COST_PTS
+
+
+def _pnl_dollars(net_pnl_pts: float) -> float:
+    """Convert net PnL in points to dollars."""
+    return net_pnl_pts * ES_POINT_VALUE
+
+
 def simulate_fixed_sl_tp(setup: MidpointSetup, stop_pts: float, target_pts: float) -> dict:
-    """Simulate a trade entered at midpoint with fixed SL/TP."""
+    """Simulate a trade entered at midpoint with fixed SL/TP. Includes costs."""
     entry = setup.or_mid
 
     if setup.direction == "long":
@@ -452,86 +489,146 @@ def simulate_fixed_sl_tp(setup: MidpointSetup, stop_pts: float, target_pts: floa
     for bar in setup.bars_after:
         if setup.direction == "long":
             if bar["Low"] <= stop:
-                return {"result": "stop", "pnl": -stop_pts}
+                return {"result": "stop", "pnl": _net_pnl(-stop_pts),
+                        "gross_pnl": -stop_pts}
             if bar["High"] >= target:
-                return {"result": "target", "pnl": target_pts}
+                return {"result": "target", "pnl": _net_pnl(target_pts),
+                        "gross_pnl": target_pts}
         else:
             if bar["High"] >= stop:
-                return {"result": "stop", "pnl": -stop_pts}
+                return {"result": "stop", "pnl": _net_pnl(-stop_pts),
+                        "gross_pnl": -stop_pts}
             if bar["Low"] <= target:
-                return {"result": "target", "pnl": target_pts}
+                return {"result": "target", "pnl": _net_pnl(target_pts),
+                        "gross_pnl": target_pts}
 
     # EOD
     last_close = setup.bars_after[-1]["Close"] if setup.bars_after else entry
-    pnl = (last_close - entry) if setup.direction == "long" else (entry - last_close)
-    return {"result": "eod", "pnl": pnl}
+    gross = (last_close - entry) if setup.direction == "long" else (entry - last_close)
+    return {"result": "eod", "pnl": _net_pnl(gross), "gross_pnl": gross}
 
 
-def simulate_trailing_stop(setup: MidpointSetup, initial_stop_pts: float,
-                            trail_activate: float, trail_distance: float) -> dict:
-    """Simulate with initial fixed stop + trailing stop after activation."""
+def simulate_be_trail(setup: MidpointSetup, initial_sl: float,
+                       be_trigger: float, trail_activate: float,
+                       trail_distance: float) -> dict:
+    """
+    Simulate with breakeven + trailing stop.
+    1. Initial fixed stop at initial_sl
+    2. Move stop to breakeven (entry) when price moves be_trigger pts in favor
+    3. Start trailing when price moves trail_activate pts in favor
+    4. Trail at trail_distance behind best price
+    """
     entry = setup.or_mid
 
     if setup.direction == "long":
-        stop = entry - initial_stop_pts
+        stop = entry - initial_sl
         best_price = entry
     else:
-        stop = entry + initial_stop_pts
+        stop = entry + initial_sl
         best_price = entry
 
+    be_active = False
     trailing_active = False
 
     for bar in setup.bars_after:
         if setup.direction == "long":
             if bar["High"] > best_price:
                 best_price = bar["High"]
-            if not trailing_active and (best_price - entry) >= trail_activate:
+            favorable = best_price - entry
+
+            # Move to breakeven
+            if not be_active and favorable >= be_trigger:
+                be_active = True
+                stop = max(stop, entry)  # breakeven
+
+            # Activate trailing
+            if not trailing_active and favorable >= trail_activate:
                 trailing_active = True
+
             if trailing_active:
                 trail_stop = best_price - trail_distance
                 stop = max(stop, trail_stop)
+
             if bar["Low"] <= stop:
-                pnl = stop - entry
-                return {"result": "trail_stop" if trailing_active else "stop",
-                        "pnl": pnl}
-        else:
+                gross = stop - entry
+                reason = "trail" if trailing_active else ("be" if be_active else "stop")
+                return {"result": reason, "pnl": _net_pnl(gross), "gross_pnl": gross}
+
+        else:  # short
             if bar["Low"] < best_price:
                 best_price = bar["Low"]
-            if not trailing_active and (entry - best_price) >= trail_activate:
+            favorable = entry - best_price
+
+            if not be_active and favorable >= be_trigger:
+                be_active = True
+                stop = min(stop, entry)
+
+            if not trailing_active and favorable >= trail_activate:
                 trailing_active = True
+
             if trailing_active:
                 trail_stop = best_price + trail_distance
                 stop = min(stop, trail_stop)
+
             if bar["High"] >= stop:
-                pnl = entry - stop
-                return {"result": "trail_stop" if trailing_active else "stop",
-                        "pnl": pnl}
+                gross = entry - stop
+                reason = "trail" if trailing_active else ("be" if be_active else "stop")
+                return {"result": reason, "pnl": _net_pnl(gross), "gross_pnl": gross}
 
+    # EOD
     last_close = setup.bars_after[-1]["Close"] if setup.bars_after else entry
-    pnl = (last_close - entry) if setup.direction == "long" else (entry - last_close)
-    return {"result": "eod", "pnl": pnl}
+    gross = (last_close - entry) if setup.direction == "long" else (entry - last_close)
+    return {"result": "eod", "pnl": _net_pnl(gross), "gross_pnl": gross}
 
 
 # ---------------------------------------------------------------------------
-# HELPER: compute stats for a group of setups with a given SL/TP
+# HELPERS
 # ---------------------------------------------------------------------------
-def _group_stats(setups_group, sl, tp, label=""):
-    """Compute win rate, avg PnL, PF for a group of setups."""
-    if not setups_group:
+def _compute_stats(results: list) -> dict:
+    """Compute stats from a list of trade results."""
+    n = len(results)
+    if n == 0:
         return None
-    results = [simulate_fixed_sl_tp(s, sl, tp) for s in setups_group]
-    wins = sum(1 for r in results if r["result"] == "target")
+    wins = sum(1 for r in results if r["pnl"] > 0)
     total_pnl = sum(r["pnl"] for r in results)
-    avg_pnl = total_pnl / len(results)
-    win_rate = wins / len(results) * 100
+    avg_pnl = total_pnl / n
+    win_rate = wins / n * 100
     gross_profit = sum(r["pnl"] for r in results if r["pnl"] > 0)
     gross_loss = abs(sum(r["pnl"] for r in results if r["pnl"] < 0))
     pf = gross_profit / gross_loss if gross_loss > 0 else 99.9
+
+    # Average winner / average loser
+    winner_pnls = [r["pnl"] for r in results if r["pnl"] > 0]
+    loser_pnls = [r["pnl"] for r in results if r["pnl"] <= 0]
+    avg_win = np.mean(winner_pnls) if winner_pnls else 0
+    avg_loss = np.mean(loser_pnls) if loser_pnls else 0
+    realized_rr = abs(avg_win / avg_loss) if avg_loss != 0 else 99.9
+
     return {
-        "n": len(results), "wins": wins, "win_rate": win_rate,
+        "n": n, "wins": wins, "win_rate": win_rate,
         "avg_pnl": avg_pnl, "total_pnl": total_pnl, "pf": pf,
-        "label": label,
+        "avg_win": avg_win, "avg_loss": avg_loss, "realized_rr": realized_rr,
     }
+
+
+def _group_stats(setups_group, sl, tp, label=""):
+    """Compute stats for a group of setups with a given SL/TP."""
+    if not setups_group:
+        return None
+    results = [simulate_fixed_sl_tp(s, sl, tp) for s in setups_group]
+    stats = _compute_stats(results)
+    if stats:
+        stats["label"] = label
+    return stats
+
+
+def _group_stats_be_trail(setups_group, initial_sl, be_trigger, trail_activate, trail_distance):
+    """Compute stats for BE+trail simulation."""
+    if not setups_group:
+        return None
+    results = [simulate_be_trail(s, initial_sl, be_trigger, trail_activate, trail_distance)
+               for s in setups_group]
+    return _compute_stats(results)
 
 
 # ---------------------------------------------------------------------------
@@ -791,16 +888,18 @@ def analyze_setups(setups: list) -> None:
         print(f"     {direction:>15} {len(bucket):>8} {wins:>8} {wr:>9.1f}% {avg_pnl:>+9.2f} {avg_mfe:>9.1f} {avg_mae:>9.1f}")
 
     # ==========================================
-    # SECTION 3: OPTIMAL SL/TP
+    # SECTION 3: OPTIMAL SL/TP (R:R GRID)
     # ==========================================
     print(f"\n{'='*80}")
-    print("SECTION 3: OPTIMAL STOP LOSS & TAKE PROFIT (entry at midpoint)")
+    print("SECTION 3: OPTIMAL STOP LOSS & TAKE PROFIT (R:R >= 1:1 only)")
+    print(f"  Includes slippage ({SLIPPAGE_TICKS} tick/side) + commission (${COMMISSION_PER_SIDE}/side)")
+    print(f"  Round-trip cost: {RT_COST_PTS:.2f} pts")
     print(f"{'='*80}")
 
-    print(f"\n  Fixed SL/TP Grid: Win Rate / Avg PnL / Profit Factor")
+    print(f"\n  R:R Grid: Win Rate / Net Avg PnL (pts) / Profit Factor")
     print(f"  {'':>8}", end="")
-    for tp in TARGET_LEVELS:
-        print(f"  TP={tp:>4.1f}pt", end="")
+    for rr in RR_RATIOS:
+        print(f"  {'R:R='+str(rr):>10}", end="")
     print()
 
     best_combo = None
@@ -809,88 +908,85 @@ def analyze_setups(setups: list) -> None:
 
     for sl in STOP_LEVELS:
         print(f"  SL={sl:>4.1f}", end="")
-        for tp in TARGET_LEVELS:
+        for rr in RR_RATIOS:
+            tp = sl * rr  # TP derived from R:R
             results = [simulate_fixed_sl_tp(s, sl, tp) for s in setups]
-            wins = sum(1 for r in results if r["result"] == "target")
-            total_pnl = sum(r["pnl"] for r in results)
-            avg_pnl = total_pnl / len(results)
-            win_rate = wins / len(results) * 100
-            gross_profit = sum(r["pnl"] for r in results if r["pnl"] > 0)
-            gross_loss = abs(sum(r["pnl"] for r in results if r["pnl"] < 0))
-            pf = gross_profit / gross_loss if gross_loss > 0 else 99.9
+            stats = _compute_stats(results)
 
-            combo = (sl, tp, win_rate, avg_pnl, total_pnl, pf, len(results))
+            combo = (sl, tp, rr, stats["win_rate"], stats["avg_pnl"],
+                     stats["total_pnl"], stats["pf"], stats["realized_rr"], stats["n"])
             all_combos.append(combo)
 
             # Track best by profit factor (must have positive PnL)
-            if avg_pnl > 0 and pf > best_pf:
-                best_pf = pf
-                best_combo = combo
-            elif best_combo is None and avg_pnl > (best_combo[3] if best_combo else -999):
+            if stats["avg_pnl"] > 0 and stats["pf"] > best_pf:
+                best_pf = stats["pf"]
                 best_combo = combo
 
-            print(f"  {win_rate:>3.0f}%/{avg_pnl:>+.1f}", end="")
+            print(f"  {stats['win_rate']:>3.0f}%/{stats['avg_pnl']:>+.1f}", end="")
         print()
 
     # Find best by avg PnL if no profitable combo found
-    if best_combo is None or best_combo[3] <= 0:
-        best_combo = max(all_combos, key=lambda x: x[3])
+    if best_combo is None:
+        best_combo = max(all_combos, key=lambda x: x[4])
 
     print(f"\n  BEST COMBO (by {'profit factor' if best_pf > 1 else 'avg PnL'}):")
-    print(f"    SL={best_combo[0]:.1f}pt, TP={best_combo[1]:.1f}pt")
-    print(f"    Win Rate: {best_combo[2]:.1f}%")
-    print(f"    Avg PnL/trade: {best_combo[3]:+.2f}pt (${best_combo[3]*50:+.0f} per contract)")
-    print(f"    Total PnL: {best_combo[4]:+.1f}pt (${best_combo[4]*50:+.0f} per contract)")
-    print(f"    Profit Factor: {best_combo[5]:.2f}")
-    print(f"    Trades: {best_combo[6]}")
+    print(f"    SL={best_combo[0]:.1f}pt, TP={best_combo[1]:.1f}pt (R:R={best_combo[2]:.1f})")
+    print(f"    Win Rate: {best_combo[3]:.1f}%")
+    print(f"    Net Avg PnL/trade: {best_combo[4]:+.2f}pt (${_pnl_dollars(best_combo[4]):+.0f} per contract)")
+    print(f"    Net Total PnL: {best_combo[5]:+.1f}pt (${_pnl_dollars(best_combo[5]):+.0f} per contract)")
+    print(f"    Profit Factor: {best_combo[6]:.2f}")
+    print(f"    Realized R:R: {best_combo[7]:.2f}")
+    print(f"    Trades: {best_combo[8]}")
 
     # Top 10 combos by avg PnL
-    print(f"\n  Top 10 SL/TP Combos by Avg PnL:")
-    print(f"  {'SL':>6} {'TP':>6} {'Win%':>7} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8} {'Trades':>8}")
-    print("  " + "-" * 60)
-    top10 = sorted(all_combos, key=lambda x: x[3], reverse=True)[:10]
+    print(f"\n  Top 10 SL/TP Combos by Net Avg PnL:")
+    print(f"  {'SL':>6} {'TP':>6} {'R:R':>5} {'Win%':>7} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8} {'Real R:R':>9}")
+    print("  " + "-" * 70)
+    top10 = sorted(all_combos, key=lambda x: x[4], reverse=True)[:10]
     for c in top10:
-        print(f"  {c[0]:>5.1f} {c[1]:>5.1f} {c[2]:>6.1f}% {c[3]:>+9.2f} {c[4]:>+11.1f} {c[5]:>7.2f} {c[6]:>8}")
+        print(f"  {c[0]:>5.1f} {c[1]:>5.1f} {c[2]:>4.1f} {c[3]:>6.1f}% {c[4]:>+9.2f} {c[5]:>+11.1f} {c[6]:>7.2f} {c[7]:>8.2f}")
 
     # ==========================================
-    # SECTION 4: TRAILING STOP
+    # SECTION 4: BREAKEVEN + TRAILING STOP
     # ==========================================
     print(f"\n{'='*80}")
-    print("SECTION 4: TRAILING STOP PERFORMANCE")
+    print("SECTION 4: BREAKEVEN + TRAILING STOP (uncapped upside)")
+    print(f"  1) Fixed stop  2) Move to breakeven  3) Start trailing")
     print(f"{'='*80}")
 
-    best_fixed_sl = best_combo[0]
-    print(f"\n  Using initial SL = {best_fixed_sl:.1f}pt (best from fixed analysis)")
-    print(f"  {'Activate':>10} {'Trail':>8} {'Win%':>8} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8}")
-    print("  " + "-" * 60)
+    print(f"\n  {'Init SL':>8} {'BE Trig':>8} {'Trail@':>8} {'Trail$':>8} {'Win%':>8} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8} {'Real R:R':>9}")
+    print("  " + "-" * 90)
 
     best_trail = None
     best_trail_pnl = -999
 
-    for activate, trail in TRAILING_CONFIGS:
-        results = [simulate_trailing_stop(s, best_fixed_sl, activate, trail) for s in setups]
-        wins = sum(1 for r in results if r["pnl"] > 0)
-        total_pnl = sum(r["pnl"] for r in results)
-        avg_pnl = total_pnl / len(results)
-        win_rate = wins / len(results) * 100
-        gross_profit = sum(r["pnl"] for r in results if r["pnl"] > 0)
-        gross_loss = abs(sum(r["pnl"] for r in results if r["pnl"] < 0))
-        pf = gross_profit / gross_loss if gross_loss > 0 else 99.9
+    for initial_sl, be_trigger, trail_activate, trail_distance in BE_TRAIL_CONFIGS:
+        results = [simulate_be_trail(s, initial_sl, be_trigger, trail_activate, trail_distance)
+                   for s in setups]
+        stats = _compute_stats(results)
 
-        if avg_pnl > best_trail_pnl:
-            best_trail_pnl = avg_pnl
-            best_trail = (activate, trail, win_rate, avg_pnl, total_pnl, pf)
+        if stats["avg_pnl"] > best_trail_pnl:
+            best_trail_pnl = stats["avg_pnl"]
+            best_trail = (initial_sl, be_trigger, trail_activate, trail_distance,
+                          stats["win_rate"], stats["avg_pnl"], stats["total_pnl"],
+                          stats["pf"], stats["realized_rr"])
 
-        print(f"  {activate:>8.1f}pt {trail:>7.1f}pt {win_rate:>7.1f}% {avg_pnl:>+9.2f}pt {total_pnl:>+11.1f}pt {pf:>7.2f}")
+        print(f"  {initial_sl:>7.1f} {be_trigger:>7.1f} {trail_activate:>7.1f} {trail_distance:>7.1f}"
+              f" {stats['win_rate']:>7.1f}% {stats['avg_pnl']:>+9.2f}pt {stats['total_pnl']:>+11.1f}pt"
+              f" {stats['pf']:>7.2f} {stats['realized_rr']:>8.2f}")
 
     if best_trail:
-        print(f"\n  BEST TRAILING: Activate at +{best_trail[0]:.1f}pt, Trail {best_trail[1]:.1f}pt")
-        print(f"    Win Rate: {best_trail[2]:.1f}%, Avg PnL: {best_trail[3]:+.2f}pt, PF: {best_trail[5]:.2f}")
+        print(f"\n  BEST BE+TRAIL: SL={best_trail[0]:.1f}, BE@+{best_trail[1]:.1f}, "
+              f"Trail@+{best_trail[2]:.1f}, Trail dist={best_trail[3]:.1f}")
+        print(f"    Win Rate: {best_trail[4]:.1f}%, Net Avg PnL: {best_trail[5]:+.2f}pt, "
+              f"PF: {best_trail[7]:.2f}, Realized R:R: {best_trail[8]:.2f}")
 
     print(f"\n  --- COMPARISON ---")
-    print(f"  Best Fixed  (SL={best_combo[0]:.1f}, TP={best_combo[1]:.1f}): avg {best_combo[3]:+.2f}pt/trade, PF {best_combo[5]:.2f}")
+    print(f"  Best Fixed  (SL={best_combo[0]:.1f}, TP={best_combo[1]:.1f}, R:R={best_combo[2]:.1f}): "
+          f"avg {best_combo[4]:+.2f}pt/trade, PF {best_combo[6]:.2f}")
     if best_trail:
-        print(f"  Best Trail  (Act={best_trail[0]:.1f}, Tr={best_trail[1]:.1f}): avg {best_trail[3]:+.2f}pt/trade, PF {best_trail[5]:.2f}")
+        print(f"  Best BE+Trail (SL={best_trail[0]:.1f}, BE@{best_trail[1]:.1f}): "
+              f"avg {best_trail[5]:+.2f}pt/trade, PF {best_trail[7]:.2f}")
 
     # ==========================================
     # SECTION 5: COMBINED FILTER OPTIMIZATION
@@ -900,10 +996,11 @@ def analyze_setups(setups: list) -> None:
     print("Testing combinations of the most promising factors")
     print(f"{'='*80}")
 
-    # Use best SL/TP from section 3
+    # Use best SL/TP from section 3 (best_combo = sl, tp, rr, win%, avg_pnl, ...)
     opt_sl = best_combo[0]
     opt_tp = best_combo[1]
-    print(f"\n  Using SL={opt_sl:.1f}pt, TP={opt_tp:.1f}pt")
+    opt_rr = best_combo[2]
+    print(f"\n  Using SL={opt_sl:.1f}pt, TP={opt_tp:.1f}pt (R:R={opt_rr:.1f})")
 
     # Define filter functions
     filters = {
@@ -999,50 +1096,41 @@ def analyze_setups(setups: list) -> None:
             filtered_setups = [s for s in setups if best_filter_func(s)]
             print(f"\n  Setups after filter: {len(filtered_setups)}")
 
-            print(f"\n  Top 15 SL/TP Combos:")
-            print(f"  {'SL':>6} {'TP':>6} {'Win%':>7} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8} {'Trades':>8}")
-            print("  " + "-" * 60)
+            print(f"\n  Top 15 SL/TP Combos (R:R >= 1:1):")
+            print(f"  {'SL':>6} {'TP':>6} {'R:R':>5} {'Win%':>7} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8} {'Trades':>8}")
+            print("  " + "-" * 70)
 
             filtered_combos = []
             for sl in STOP_LEVELS:
-                for tp in TARGET_LEVELS:
+                for rr in RR_RATIOS:
+                    tp = sl * rr
                     results = [simulate_fixed_sl_tp(s, sl, tp) for s in filtered_setups]
-                    wins = sum(1 for r in results if r["result"] == "target")
-                    total_pnl = sum(r["pnl"] for r in results)
-                    avg_pnl = total_pnl / len(results)
-                    win_rate = wins / len(results) * 100
-                    gross_profit = sum(r["pnl"] for r in results if r["pnl"] > 0)
-                    gross_loss = abs(sum(r["pnl"] for r in results if r["pnl"] < 0))
-                    pf = gross_profit / gross_loss if gross_loss > 0 else 99.9
-                    filtered_combos.append((sl, tp, win_rate, avg_pnl, total_pnl, pf, len(results)))
+                    stats = _compute_stats(results)
+                    filtered_combos.append((sl, tp, rr, stats["win_rate"], stats["avg_pnl"],
+                                            stats["total_pnl"], stats["pf"], stats["n"]))
 
-            top15 = sorted(filtered_combos, key=lambda x: x[3], reverse=True)[:15]
+            top15 = sorted(filtered_combos, key=lambda x: x[4], reverse=True)[:15]
             for c in top15:
-                print(f"  {c[0]:>5.1f} {c[1]:>5.1f} {c[2]:>6.1f}% {c[3]:>+9.2f} {c[4]:>+11.1f} {c[5]:>7.2f} {c[6]:>8}")
+                print(f"  {c[0]:>5.1f} {c[1]:>5.1f} {c[2]:>4.1f} {c[3]:>6.1f}% {c[4]:>+9.2f} {c[5]:>+11.1f} {c[6]:>7.2f} {c[7]:>8}")
 
-            # Also test trailing stops on filtered setups
-            best_filt_sl = top15[0][0]
-            print(f"\n  Trailing Stop on Filtered (initial SL={best_filt_sl:.1f}pt):")
-            print(f"  {'Activate':>10} {'Trail':>8} {'Win%':>8} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8}")
-            print("  " + "-" * 60)
+            # Also test BE+trail on filtered setups
+            print(f"\n  BE+Trail on Filtered Setups:")
+            print(f"  {'Init SL':>8} {'BE Trig':>8} {'Trail@':>8} {'Trail$':>8} {'Win%':>8} {'Avg PnL':>10} {'Total PnL':>12} {'PF':>8}")
+            print("  " + "-" * 80)
 
-            for activate, trail in TRAILING_CONFIGS:
-                results = [simulate_trailing_stop(s, best_filt_sl, activate, trail)
+            for initial_sl, be_trigger, trail_activate, trail_distance in BE_TRAIL_CONFIGS:
+                results = [simulate_be_trail(s, initial_sl, be_trigger, trail_activate, trail_distance)
                            for s in filtered_setups]
-                wins = sum(1 for r in results if r["pnl"] > 0)
-                total_pnl = sum(r["pnl"] for r in results)
-                avg_pnl = total_pnl / len(results)
-                win_rate = wins / len(results) * 100
-                gross_profit = sum(r["pnl"] for r in results if r["pnl"] > 0)
-                gross_loss = abs(sum(r["pnl"] for r in results if r["pnl"] < 0))
-                pf = gross_profit / gross_loss if gross_loss > 0 else 99.9
-                print(f"  {activate:>8.1f}pt {trail:>7.1f}pt {win_rate:>7.1f}% {avg_pnl:>+9.2f}pt {total_pnl:>+11.1f}pt {pf:>7.2f}")
+                stats = _compute_stats(results)
+                print(f"  {initial_sl:>7.1f} {be_trigger:>7.1f} {trail_activate:>7.1f} {trail_distance:>7.1f}"
+                      f" {stats['win_rate']:>7.1f}% {stats['avg_pnl']:>+9.2f}pt"
+                      f" {stats['total_pnl']:>+11.1f}pt {stats['pf']:>7.2f}")
 
     # ==========================================
     # SECTION 7: DAILY BREAKDOWN
     # ==========================================
     print(f"\n{'='*80}")
-    print(f"SECTION 7: DAILY P&L (SL={best_combo[0]:.1f}, TP={best_combo[1]:.1f})")
+    print(f"SECTION 7: DAILY P&L (SL={best_combo[0]:.1f}, TP={best_combo[1]:.1f}, R:R={best_combo[2]:.1f})")
     print(f"{'='*80}")
 
     sl, tp = best_combo[0], best_combo[1]
@@ -1075,7 +1163,103 @@ def analyze_setups(setups: list) -> None:
     print(f"  Winning days: {win_days} | Losing days: {lose_days} | Flat: {flat_days}")
     print(f"  Max daily gain: {max(d['pnl'] for d in daily_results.values()):+.2f}pt")
     print(f"  Max daily loss: {min(d['pnl'] for d in daily_results.values()):+.2f}pt")
-    print(f"  Final cumulative PnL: {cumulative:+.2f}pt (${cumulative*50:+.0f} per contract)")
+    print(f"  Final cumulative PnL: {cumulative:+.2f}pt (${_pnl_dollars(cumulative):+.0f} per contract)")
+
+    # ==========================================
+    # SECTION 8: WALK-FORWARD VALIDATION
+    # ==========================================
+    print(f"\n{'='*80}")
+    print("SECTION 8: WALK-FORWARD VALIDATION")
+    print("  Training on first 70% of data, testing on last 30%")
+    print(f"{'='*80}")
+
+    # Sort setups by date
+    sorted_setups = sorted(setups, key=lambda s: (s.date, s.time_of_midpoint_touch))
+    split_idx = int(len(sorted_setups) * 0.70)
+    train_setups = sorted_setups[:split_idx]
+    test_setups = sorted_setups[split_idx:]
+
+    if train_setups and test_setups:
+        train_dates = (str(train_setups[0].date), str(train_setups[-1].date))
+        test_dates = (str(test_setups[0].date), str(test_setups[-1].date))
+        print(f"\n  Train: {len(train_setups)} setups ({train_dates[0]} to {train_dates[1]})")
+        print(f"  Test:  {len(test_setups)} setups ({test_dates[0]} to {test_dates[1]})")
+
+        # Find best SL/TP on training set
+        print(f"\n  --- Finding best R:R combo on TRAINING data ---")
+        train_combos = []
+        for sl_val in STOP_LEVELS:
+            for rr_val in RR_RATIOS:
+                tp_val = sl_val * rr_val
+                results = [simulate_fixed_sl_tp(s, sl_val, tp_val) for s in train_setups]
+                stats = _compute_stats(results)
+                train_combos.append((sl_val, tp_val, rr_val, stats))
+
+        # Best by profit factor (with positive avg PnL)
+        profitable = [c for c in train_combos if c[3]["avg_pnl"] > 0 and c[3]["pf"] > 1]
+        if profitable:
+            best_train = max(profitable, key=lambda c: c[3]["pf"])
+        else:
+            best_train = max(train_combos, key=lambda c: c[3]["avg_pnl"])
+
+        bt_sl, bt_tp, bt_rr, bt_stats = best_train
+        print(f"  Best train combo: SL={bt_sl:.1f}, TP={bt_tp:.1f} (R:R={bt_rr:.1f})")
+        print(f"    Train: {bt_stats['n']} trades, {bt_stats['win_rate']:.1f}% WR, "
+              f"avg PnL {bt_stats['avg_pnl']:+.2f}pt, PF {bt_stats['pf']:.2f}")
+
+        # Test on out-of-sample
+        test_results = [simulate_fixed_sl_tp(s, bt_sl, bt_tp) for s in test_setups]
+        test_stats = _compute_stats(test_results)
+        print(f"    Test:  {test_stats['n']} trades, {test_stats['win_rate']:.1f}% WR, "
+              f"avg PnL {test_stats['avg_pnl']:+.2f}pt, PF {test_stats['pf']:.2f}")
+        print(f"    Test total PnL: {test_stats['total_pnl']:+.1f}pt "
+              f"(${_pnl_dollars(test_stats['total_pnl']):+.0f})")
+
+        # Degradation
+        pf_degrade = (test_stats['pf'] / bt_stats['pf'] * 100) if bt_stats['pf'] > 0 else 0
+        print(f"\n  Out-of-sample retention:")
+        print(f"    PF retention: {pf_degrade:.0f}% of in-sample")
+        print(f"    Win rate: train {bt_stats['win_rate']:.1f}% → test {test_stats['win_rate']:.1f}%")
+        print(f"    Avg PnL: train {bt_stats['avg_pnl']:+.2f} → test {test_stats['avg_pnl']:+.2f}")
+
+        if test_stats['avg_pnl'] > 0 and test_stats['pf'] > 1:
+            print(f"\n  VERDICT: Edge HOLDS out of sample (PF > 1, positive avg PnL)")
+        elif test_stats['avg_pnl'] > 0:
+            print(f"\n  VERDICT: Marginal edge out of sample (positive but PF < 1)")
+        else:
+            print(f"\n  VERDICT: Edge DOES NOT hold out of sample")
+
+        # Also test best BE+trail on walk-forward
+        print(f"\n  --- Walk-forward for BE+Trail ---")
+        train_trail_results = []
+        for cfg in BE_TRAIL_CONFIGS:
+            results = [simulate_be_trail(s, *cfg) for s in train_setups]
+            stats = _compute_stats(results)
+            train_trail_results.append((cfg, stats))
+
+        profitable_trails = [t for t in train_trail_results if t[1]["avg_pnl"] > 0 and t[1]["pf"] > 1]
+        if profitable_trails:
+            best_train_trail = max(profitable_trails, key=lambda t: t[1]["pf"])
+        elif train_trail_results:
+            best_train_trail = max(train_trail_results, key=lambda t: t[1]["avg_pnl"])
+        else:
+            best_train_trail = None
+
+        if best_train_trail:
+            cfg, tr_stats = best_train_trail
+            print(f"  Best train BE+trail: SL={cfg[0]:.1f}, BE@+{cfg[1]:.1f}, "
+                  f"Trail@+{cfg[2]:.1f}, Dist={cfg[3]:.1f}")
+            print(f"    Train: {tr_stats['n']} trades, {tr_stats['win_rate']:.1f}% WR, "
+                  f"avg PnL {tr_stats['avg_pnl']:+.2f}pt, PF {tr_stats['pf']:.2f}")
+
+            test_trail_results = [simulate_be_trail(s, *cfg) for s in test_setups]
+            test_tr_stats = _compute_stats(test_trail_results)
+            print(f"    Test:  {test_tr_stats['n']} trades, {test_tr_stats['win_rate']:.1f}% WR, "
+                  f"avg PnL {test_tr_stats['avg_pnl']:+.2f}pt, PF {test_tr_stats['pf']:.2f}")
+            print(f"    Test total PnL: {test_tr_stats['total_pnl']:+.1f}pt "
+                  f"(${_pnl_dollars(test_tr_stats['total_pnl']):+.0f})")
+    else:
+        print("\n  Not enough data for walk-forward split.")
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trade Calendar</title>
+<style>
+/* --- Reset & Base --- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #0f1117;
+  color: #e2e8f0;
+  min-height: 100vh;
+  padding: 24px 32px;
+}
+
+/* --- Header --- */
+.header { margin-bottom: 24px; }
+.header h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+.header p { color: #94a3b8; font-size: 14px; }
+
+/* --- Controls --- */
+.controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.nav-group, .mode-group {
+  display: flex;
+  background: #1e2030;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.nav-group button, .mode-group button {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  padding: 8px 18px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.nav-group button:hover, .mode-group button:hover { color: #e2e8f0; background: #2a2d3e; }
+.nav-group button.active, .mode-group button.active {
+  background: #334155;
+  color: #fff;
+  font-weight: 600;
+}
+
+/* --- Calendar Card --- */
+.calendar-card {
+  background: #1a1d2e;
+  border-radius: 12px;
+  padding: 24px;
+  border: 1px solid #2a2d3e;
+}
+.cal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 4px;
+}
+.cal-header h2 { font-size: 22px; font-weight: 700; }
+.month-pnl { font-size: 28px; font-weight: 700; text-align: right; }
+.month-pnl.positive { color: #4ade80; }
+.month-pnl.negative { color: #f87171; }
+.trade-count { color: #94a3b8; font-size: 13px; margin-bottom: 16px; }
+
+/* --- Calendar Grid --- */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr) 0.9fr;
+  gap: 6px;
+}
+.cal-day-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  padding: 8px 4px;
+  letter-spacing: 0.5px;
+}
+.cal-cell {
+  background: #232640;
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 90px;
+  position: relative;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+.cal-cell.clickable {
+  cursor: pointer;
+}
+.cal-cell.clickable:hover {
+  background: #2a2d50;
+  border-color: #475569;
+  transform: translateY(-1px);
+}
+.cal-cell.empty { background: transparent; }
+.cal-cell .day-num {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #cbd5e1;
+}
+.cal-cell .day-pnl {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.cal-cell .day-pnl.positive { color: #4ade80; }
+.cal-cell .day-pnl.negative { color: #f87171; }
+.cal-cell .day-pnl.zero { color: #64748b; }
+.cal-cell .day-trades {
+  font-size: 11px;
+  color: #64748b;
+}
+.cal-cell.selected {
+  border-color: #60a5fa;
+  background: #1e3a5f;
+}
+
+/* --- Week total column --- */
+.week-total {
+  background: #1e2030;
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 90px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.week-total .week-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: #94a3b8;
+  margin-bottom: 6px;
+}
+.week-total .week-pnl {
+  font-size: 18px;
+  font-weight: 700;
+}
+.week-total .week-pnl.positive { color: #4ade80; }
+.week-total .week-pnl.negative { color: #f87171; }
+.week-total .week-trades {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+/* --- Day Detail Slide-out Panel --- */
+.panel-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 100;
+}
+.panel-overlay.open { display: block; }
+
+.detail-panel {
+  position: fixed;
+  top: 0;
+  right: -520px;
+  width: 520px;
+  height: 100vh;
+  background: #1a1d2e;
+  border-left: 1px solid #2a2d3e;
+  z-index: 101;
+  transition: right 0.25s ease;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.detail-panel.open { right: 0; }
+
+.panel-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid #2a2d3e;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: #1a1d2e;
+  z-index: 1;
+}
+.panel-header h3 { font-size: 18px; font-weight: 700; }
+.panel-header .panel-pnl { font-size: 20px; font-weight: 700; }
+.panel-close {
+  background: #2a2d3e;
+  border: none;
+  color: #94a3b8;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.panel-close:hover { background: #334155; color: #fff; }
+
+.panel-body { padding: 16px 24px; flex: 1; }
+
+/* --- Trade Card in Panel --- */
+.trade-card {
+  background: #232640;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border: 1px solid #2a2d3e;
+}
+.trade-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.trade-direction {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+.trade-direction.long { background: #166534; color: #4ade80; }
+.trade-direction.short { background: #7f1d1d; color: #fca5a5; }
+.trade-pnl { font-size: 16px; font-weight: 700; }
+.trade-pnl.positive { color: #4ade80; }
+.trade-pnl.negative { color: #f87171; }
+
+.trade-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 10px;
+}
+.trade-details span { color: #cbd5e1; font-weight: 500; }
+
+.trade-signal {
+  font-size: 11px;
+  color: #60a5fa;
+  background: #1e3a5f;
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+/* --- Tags --- */
+.tags-section { margin-top: 8px; }
+.tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.tag {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: #334155;
+  color: #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+.tag .tag-remove {
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1;
+}
+.tag .tag-remove:hover { color: #f87171; }
+
+/* Preset tag buttons */
+.tag-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.tag-preset {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px dashed #475569;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tag-preset:hover {
+  border-color: #60a5fa;
+  color: #60a5fa;
+  background: #1e3a5f;
+}
+.tag-preset.applied {
+  border-style: solid;
+  border-color: #60a5fa;
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+
+/* Custom tag input */
+.tag-input-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.tag-input {
+  flex: 1;
+  background: #1a1d2e;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  padding: 4px 10px;
+  font-size: 12px;
+  outline: none;
+}
+.tag-input:focus { border-color: #60a5fa; }
+.tag-input::placeholder { color: #64748b; }
+.tag-add-btn {
+  background: #334155;
+  border: none;
+  color: #e2e8f0;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tag-add-btn:hover { background: #475569; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Calendar</h1>
+  <p>Monthly and weekly P&L rolled into one view, using bundled copied trades instead of per-account trade counts.</p>
+</div>
+
+<div class="controls">
+  <div class="nav-group">
+    <button id="btn-prev" onclick="navigate(-1)">Previous</button>
+    <button id="btn-current" class="active" onclick="goToday()">Current</button>
+    <button id="btn-next" onclick="navigate(1)">Next</button>
+  </div>
+  <div class="mode-group">
+    <button id="btn-gross" class="active" onclick="setMode('gross')">Gross</button>
+    <button id="btn-net" onclick="setMode('net')">Net</button>
+  </div>
+</div>
+
+<div class="calendar-card">
+  <div class="cal-header">
+    <div>
+      <h2 id="month-title"></h2>
+      <div class="trade-count" id="month-trade-count"></div>
+    </div>
+    <div class="month-pnl" id="month-pnl"></div>
+  </div>
+  <div class="cal-grid" id="cal-grid"></div>
+</div>
+
+<!-- Slide-out panel overlay -->
+<div class="panel-overlay" id="panel-overlay" onclick="closePanel()"></div>
+
+<!-- Trade detail panel -->
+<div class="detail-panel" id="detail-panel">
+  <div class="panel-header">
+    <div>
+      <h3 id="panel-date"></h3>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+      <div class="panel-pnl" id="panel-pnl"></div>
+      <button class="panel-close" onclick="closePanel()">&times;</button>
+    </div>
+  </div>
+  <div class="panel-body" id="panel-body">
+    <!-- Trades loaded here -->
+  </div>
+</div>
+
+<script>
+// --- State ---
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DAY_HEADERS = ['SUN','MON','TUE','WED','THU','FRI','SAT','WEEK TOTAL'];
+
+const PRESET_TAGS = [
+  'A+ Setup', 'B Setup', 'C Setup',
+  'Revenge Trade', 'FOMO', 'Oversize',
+  'News Event', 'Trend Day', 'Chop Day',
+  'Great Entry', 'Bad Entry', 'Early Exit',
+  'Perfect Execution', 'Review Later',
+];
+
+let currentYear, currentMonth, currentMode = 'gross';
+let selectedDay = null;
+
+// Init to current month
+const now = new Date();
+currentYear = now.getFullYear();
+currentMonth = now.getMonth() + 1;
+
+function navigate(dir) {
+  currentMonth += dir;
+  if (currentMonth > 12) { currentMonth = 1; currentYear++; }
+  if (currentMonth < 1) { currentMonth = 12; currentYear--; }
+  selectedDay = null;
+  loadMonth();
+}
+
+function goToday() {
+  currentYear = now.getFullYear();
+  currentMonth = now.getMonth() + 1;
+  selectedDay = null;
+  loadMonth();
+}
+
+function setMode(mode) {
+  currentMode = mode;
+  document.getElementById('btn-gross').classList.toggle('active', mode === 'gross');
+  document.getElementById('btn-net').classList.toggle('active', mode === 'net');
+  loadMonth();
+}
+
+function formatPnl(val) {
+  const prefix = val >= 0 ? '' : '-';
+  return prefix + '$' + Math.abs(val).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function pnlClass(val) {
+  if (val > 0) return 'positive';
+  if (val < 0) return 'negative';
+  return 'zero';
+}
+
+async function loadMonth() {
+  const res = await fetch(`/api/calendar/${currentYear}/${currentMonth}?mode=${currentMode}`);
+  const data = await res.json();
+
+  // Header
+  document.getElementById('month-title').textContent = `${MONTH_NAMES[currentMonth-1]} ${currentYear}`;
+  document.getElementById('month-trade-count').textContent = `${data.total_trades} trades in this month grid`;
+
+  const pnlEl = document.getElementById('month-pnl');
+  pnlEl.textContent = formatPnl(data.total_pnl);
+  pnlEl.className = 'month-pnl ' + pnlClass(data.total_pnl);
+
+  // Build grid
+  const grid = document.getElementById('cal-grid');
+  grid.innerHTML = '';
+
+  // Day headers
+  DAY_HEADERS.forEach(h => {
+    const el = document.createElement('div');
+    el.className = 'cal-day-header';
+    el.textContent = h;
+    grid.appendChild(el);
+  });
+
+  // Calendar cells
+  const firstDay = new Date(currentYear, currentMonth - 1, 1).getDay(); // 0=Sun
+  const daysInMonth = new Date(currentYear, currentMonth, 0).getDate();
+
+  // Build weeks
+  let dayNum = 1;
+  let weekPnl = 0, weekTrades = 0, weekNum = 1;
+
+  // Leading empty cells
+  for (let i = 0; i < firstDay; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'cal-cell empty';
+    grid.appendChild(cell);
+  }
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dayOfWeek = new Date(currentYear, currentMonth - 1, d).getDay();
+
+    // If Sunday and not first day, output week total for previous week
+    if (dayOfWeek === 0 && d > 1) {
+      appendWeekTotal(grid, weekNum, weekPnl, weekTrades);
+      weekNum++;
+      weekPnl = 0;
+      weekTrades = 0;
+    }
+
+    const dayData = data.days[d] || {pnl: 0, trades: 0};
+    weekPnl += dayData.pnl;
+    weekTrades += dayData.trades;
+
+    const cell = document.createElement('div');
+    cell.className = 'cal-cell' + (dayData.trades > 0 ? ' clickable' : '');
+    if (selectedDay === d) cell.classList.add('selected');
+
+    cell.innerHTML = `
+      <div class="day-num">${d}</div>
+      <div class="day-pnl ${pnlClass(dayData.pnl)}">${formatPnl(dayData.pnl)}</div>
+      <div class="day-trades">${dayData.trades} trades</div>
+    `;
+
+    cell.addEventListener('click', () => openDay(d, dayData));
+    grid.appendChild(cell);
+
+    // If Saturday or last day, output week total
+    if (dayOfWeek === 6 || d === daysInMonth) {
+      // Fill remaining cells if last day isn't Saturday
+      if (d === daysInMonth && dayOfWeek !== 6) {
+        for (let e = dayOfWeek + 1; e <= 6; e++) {
+          const empty = document.createElement('div');
+          empty.className = 'cal-cell empty';
+          grid.appendChild(empty);
+        }
+      }
+      appendWeekTotal(grid, weekNum, weekPnl, weekTrades);
+      if (d < daysInMonth) {
+        weekNum++;
+        weekPnl = 0;
+        weekTrades = 0;
+      }
+    }
+  }
+}
+
+function appendWeekTotal(grid, weekNum, pnl, trades) {
+  const wt = document.createElement('div');
+  wt.className = 'week-total';
+  wt.innerHTML = `
+    <div class="week-label">Week ${weekNum}</div>
+    <div class="week-pnl ${pnlClass(pnl)}">${formatPnl(pnl)}</div>
+    <div class="week-trades">${trades} trades</div>
+  `;
+  grid.appendChild(wt);
+}
+
+async function openDay(day, dayData) {
+  selectedDay = day;
+  loadMonth(); // Re-render to show selected state
+
+  const dateStr = `${currentYear}-${String(currentMonth).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  const dateDisplay = new Date(currentYear, currentMonth - 1, day)
+    .toLocaleDateString('en-US', {weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'});
+
+  document.getElementById('panel-date').textContent = dateDisplay;
+
+  const res = await fetch(`/api/trades/${currentYear}/${currentMonth}/${day}`);
+  const data = await res.json();
+
+  const pnlEl = document.getElementById('panel-pnl');
+  pnlEl.textContent = formatPnl(data.total_pnl);
+  pnlEl.className = 'panel-pnl ' + pnlClass(data.total_pnl);
+
+  renderTrades(data.trades);
+
+  document.getElementById('panel-overlay').classList.add('open');
+  document.getElementById('detail-panel').classList.add('open');
+}
+
+function closePanel() {
+  document.getElementById('panel-overlay').classList.remove('open');
+  document.getElementById('detail-panel').classList.remove('open');
+  selectedDay = null;
+  loadMonth();
+}
+
+function renderTrades(trades) {
+  const body = document.getElementById('panel-body');
+  if (!trades.length) {
+    body.innerHTML = '<p style="color:#64748b;padding:20px 0;">No trades on this day.</p>';
+    return;
+  }
+
+  body.innerHTML = trades.map((t, i) => `
+    <div class="trade-card" data-trade-id="${encodeURIComponent(t.id)}">
+      <div class="trade-top">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="trade-direction ${t.direction}">${t.direction}</span>
+          <span class="trade-signal">${t.signal_name}</span>
+        </div>
+        <div class="trade-pnl ${pnlClass(t.pnl_dollars)}">${formatPnl(t.pnl_dollars)}</div>
+      </div>
+      <div class="trade-details">
+        <div>Entry: <span>${t.entry_time}</span></div>
+        <div>Exit: <span>${t.exit_time}</span></div>
+        <div>Entry: <span>$${t.entry_price.toFixed(2)}</span></div>
+        <div>Exit: <span>$${t.exit_price.toFixed(2)}</span></div>
+        <div>Points: <span>${t.pnl_points > 0 ? '+' : ''}${t.pnl_points.toFixed(2)}</span></div>
+        <div>Exit: <span>${t.exit_reason}</span></div>
+        <div>Contracts: <span>${t.contracts}</span></div>
+      </div>
+      <div class="tags-section">
+        <div class="tags-row" id="tags-${i}">
+          ${t.tags.map(tag => `
+            <span class="tag">${tag}<span class="tag-remove" onclick="removeTag('${encodeURIComponent(t.id)}', '${tag}', ${i})">&times;</span></span>
+          `).join('')}
+        </div>
+        <div class="tag-presets" id="presets-${i}">
+          ${PRESET_TAGS.map(pt => `
+            <button class="tag-preset ${t.tags.includes(pt) ? 'applied' : ''}"
+                    onclick="togglePresetTag('${encodeURIComponent(t.id)}', '${pt}', ${i})">${pt}</button>
+          `).join('')}
+        </div>
+        <div class="tag-input-row">
+          <input class="tag-input" id="input-${i}" placeholder="Custom tag..." onkeydown="if(event.key==='Enter')addCustomTag('${encodeURIComponent(t.id)}', ${i})">
+          <button class="tag-add-btn" onclick="addCustomTag('${encodeURIComponent(t.id)}', ${i})">Add</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function togglePresetTag(tradeId, tag, tradeIdx) {
+  const id = decodeURIComponent(tradeId);
+  // Check if already applied
+  const btn = event.target;
+  const isApplied = btn.classList.contains('applied');
+
+  const res = await fetch(`/api/trades/${encodeURIComponent(id)}/tags`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: isApplied ? 'remove' : 'add', tag}),
+  });
+  const data = await res.json();
+
+  // Refresh the day to get updated tags
+  refreshCurrentDay();
+}
+
+async function removeTag(tradeId, tag, tradeIdx) {
+  const id = decodeURIComponent(tradeId);
+  await fetch(`/api/trades/${encodeURIComponent(id)}/tags`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'remove', tag}),
+  });
+  refreshCurrentDay();
+}
+
+async function addCustomTag(tradeId, tradeIdx) {
+  const input = document.getElementById(`input-${tradeIdx}`);
+  const tag = input.value.trim();
+  if (!tag) return;
+
+  const id = decodeURIComponent(tradeId);
+  await fetch(`/api/trades/${encodeURIComponent(id)}/tags`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'add', tag}),
+  });
+  input.value = '';
+  refreshCurrentDay();
+}
+
+async function refreshCurrentDay() {
+  if (selectedDay === null) return;
+  const res = await fetch(`/api/trades/${currentYear}/${currentMonth}/${selectedDay}`);
+  const data = await res.json();
+  renderTrades(data.trades);
+}
+
+// Escape key closes panel
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closePanel();
+});
+
+// Initial load
+loadMonth();
+</script>
+</body>
+</html>
